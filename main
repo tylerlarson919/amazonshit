@@ -1,0 +1,316 @@
+import os
+import boto3
+import json
+import logging
+import tkinter as tk
+from tkinter import messagebox
+
+# Set up logging
+logging.basicConfig(filename='repricing.log', level=logging.INFO)
+
+# Use the client object to make AWS API requests
+region_name = 'us-east-1'
+
+client = boto3.client('pricing', region_name=region_name)
+
+
+
+# Define function to get current buy box price
+def get_buy_box_price(asin):
+    response = client.get_products(ServiceCode='AmazonS3', Filters=[
+                                   {'Type': 'TERM_MATCH', 'Field': 'sku', 'Value': asin}])
+    return response['PriceList'][0]['terms']['OnDemand'][next(iter(response['PriceList'][0]['terms']['OnDemand']))]['priceDimensions'][next(iter(response['PriceList'][0]['terms']['OnDemand'][next(iter(response['PriceList'][0]['terms']['OnDemand']))]['priceDimensions']))]['pricePerUnit']['USD']
+
+# Define function to reprice item
+def reprice(asin, price):
+    response = client.get_products(ServiceCode='AmazonS3', Filters=[
+                                   {'Type': 'TERM_MATCH', 'Field': 'sku', 'Value': asin}])
+    sku = response['PriceList'][0]['sku']
+    offer_id = response['PriceList'][0]['offers'][0]['offerId']
+    item_condition = response['PriceList'][0]['product']['attributes']['itemCondition']
+    response = client.create_change_set(
+        Catalog='AWSMarketplace',
+        ChangeSetFormat='JSON',
+        ChangeSetName='Reprice',
+        ChangeSet=[
+            {
+                "ChangeType": "Modify",
+                "Entity": "Offer",
+                "Identifier": {
+                    "MarketplaceId": marketplace_id,
+                    "OfferType": "OfferListing",
+                    "SellerId": os.environ['SELLER_ID'],
+                    "SKU": sku
+                },
+                "Details": {
+                    "ItemCondition": item_condition,
+                    "Shipping": {
+                        "StandardShippingRates": {
+                            "US": {
+                                "Amount": "0.00",
+                                "CurrencyCode": "USD"
+                            }
+                        }
+                    },
+                    "Price": {
+                        "StandardPrice": {
+                            "Amount": price,
+                            "CurrencyCode": "USD"
+                        }
+                    },
+                    "OfferListingId": offer_id
+                }
+            }
+        ]
+    )
+    response = client.execute_change_set(
+        Catalog='AWSMarketplace',
+        ChangeSetName='Reprice',
+        ChangeSetId=response['ChangeSetId']
+    )
+    logging.info(f'Repriced ASIN {asin} to {price}')
+
+# Define function to periodically check and update prices
+def check_and_update_prices():
+    for asin in asin_list:
+        current_price = get_buy_box_price(asin)
+        # Reprice only if price has changed and is within the minimum and maximum price range
+        if current_price != repricing_dict[asin] and min_price_dict[asin] <= current_price <= max_price_dict[asin]:
+            reprice(asin, current_price)
+            repricing_dict[asin] = current_price
+    root.after(repricing_frequency_dict[asin] * 1000, check_and_update_prices)  # Schedule to run again after the repricing frequency
+
+# Define function to handle form submission
+def submit_form():
+    global region, access_key, secret_key, marketplace_id, asin_list, repricing_dict, min_price_dict, max_price_dict, repricing_frequency_dict
+
+    # Get input values from form
+    region = region_var.get()
+    access_key = access_key_var.get()
+    secret_key = secret_key_var.get()
+    marketplace_id = marketplace_id_var.get()
+# Part two
+    asin_list = asin_list_var.get().split('\n')
+    repricing_frequency_list = repricing_frequency_var.get().split('\n')
+    
+    # Convert repricing frequency list to dictionary with ASIN as key and frequency as value
+    repricing_frequency_dict = {}
+    for i in range(len(asin_list)):
+        repricing_frequency_dict[asin_list[i]] = int(repricing_frequency_list[i])
+
+    # Get current prices for each ASIN and add to repricing dictionary
+    repricing_dict = {}
+    for asin in asin_list:
+        repricing_dict[asin] = get_buy_box_price(asin)
+
+    # Get minimum prices for each ASIN and add to min price dictionary
+    min_price_list = min_price_var.get().split('\n')
+    min_price_dict = {}
+    for i in range(len(asin_list)):
+        min_price_dict[asin_list[i]] = float(min_price_list[i])
+
+    # Get maximum prices for each ASIN and add to max price dictionary
+    max_price_list = max_price_var.get().split('\n')
+    max_price_dict = {}
+    for i in range(len(asin_list)):
+        max_price_dict[asin_list[i]] = float(max_price_list[i])
+
+    # Hide form and show main window
+    form_frame.pack_forget()
+    main_frame.pack()
+
+    # Start periodic price checking and updating
+    check_and_update_prices()
+
+# Define main window
+root = tk.Tk()
+root.title('Amazon Repricer')
+
+# Define form frame
+form_frame = tk.Frame(root)
+
+# Define the desired_profit_margin_label
+desired_profit_margin_label = tk.Label(root, text='Desired profit margin:')
+desired_profit_margin_label.pack(side=tk.LEFT)
+
+# Define the desired_profit_margin_entry
+desired_profit_margin_entry = tk.Entry(root)
+desired_profit_margin_entry.pack(side=tk.LEFT)
+
+
+# Define form labels
+region_label = tk.Label(form_frame, text='Region:')
+access_key_label = tk.Label(form_frame, text='Access Key:')
+secret_key_label = tk.Label(form_frame, text='Secret Key:')
+marketplace_id_label = tk.Label(form_frame, text='Marketplace ID:')
+asin_list_label = tk.Label(form_frame, text='ASIN List:')
+min_price_label = tk.Label(form_frame, text='Minimum Price List:')
+max_price_label = tk.Label(form_frame, text='Maximum Price List:')
+repricing_frequency_label = tk.Label(form_frame, text='Repricing Frequency List (in seconds):')
+
+
+
+# Define form entry fields
+region_var = tk.StringVar()
+region_entry = tk.Entry(form_frame, textvariable=region_var)
+access_key_var = tk.StringVar()
+access_key_entry = tk.Entry(form_frame, textvariable=access_key_var)
+secret_key_var = tk.StringVar()
+secret_key_entry = tk.Entry(form_frame, textvariable=secret_key_var, show='*')
+marketplace_id_var = tk.StringVar()
+marketplace_id_entry = tk.Entry(form_frame, textvariable=marketplace_id_var)
+asin_list_var = tk.StringVar()
+asin_list_entry = tk.Text(form_frame, height=10, width=50)
+min_price_var = tk.StringVar()
+min_price_entry = tk.Text(form_frame, height=10, width=50)
+max_price_var = tk.StringVar()
+max_price_entry = tk.Text(form_frame, height=10, width=50)
+repricing_frequency_var = tk.StringVar()
+repricing_frequency_entry = tk.Text(form_frame, height=10, width=50)
+
+# Define form submit button
+submit_button = tk.Button(form_frame, text='Submit', command=submit_form)
+
+# Add form elements to grid
+region_label.grid(row=0, column=0, sticky='w')
+region_entry.grid(row=0, column=1)
+access_key_label.grid(row=1, column=0, sticky='w')
+access_key_entry.grid(row=1, column=1)
+secret_key_label.grid(row=2, column=0, sticky='w')
+secret_key_entry.grid(row=2, column=1)
+min_price_label.grid(row=3, column=0, sticky='w')
+min_price_entry.grid(row=3, column=1)
+max_price_label.grid(row=4, column=0, sticky='w')
+max_price_entry.grid(row=4, column=1)
+desired_profit_margin_label.grid(row=5, column=0, sticky='w')
+desired_profit_margin_entry.grid(row=5, column=1)
+# part three
+# Define function to handle form submission
+def submit_form():
+    global region, access_key, secret_key, marketplace_id, asin_list, repricing_dict, min_price_dict, max_price_dict, repricing_frequency_dict
+
+    # Get input values from form
+    region = region_var.get()
+    access_key = access_key_var.get()
+    secret_key = secret_key_var.get()
+    marketplace_id = marketplace_id_var.get()
+    asin_list = asin_list_var.get().split(',')
+    repricing_frequency_list = repricing_frequency_var.get().split(',')
+
+    # Convert repricing frequency values to integers and create a dictionary
+    repricing_frequency_dict = {}
+    for i in range(len(asin_list)):
+        repricing_frequency_dict[asin_list[i]] = int(repricing_frequency_list[i])
+
+    # Get initial prices and set up dictionaries for tracking
+    repricing_dict = {}
+    min_price_dict = {}
+    max_price_dict = {}
+    for asin in asin_list:
+        repricing_dict[asin] = get_buy_box_price(asin)
+        min_price_dict[asin] = float('-inf')
+        max_price_dict[asin] = float('inf')
+
+    # Call function to periodically check and update prices
+    check_and_update_prices()
+
+# Set up GUI form
+root = tk.Tk()
+root.title('Amazon Repricer')
+
+# Create form elements
+region_label = tk.Label(root, text='Region')
+region_var = tk.StringVar(value='us-east-1')
+region_entry = tk.Entry(root, textvariable=region_var)
+
+access_key_label = tk.Label(root, text='Access Key')
+access_key_var = tk.StringVar(value=os.environ.get('AWS_ACCESS_KEY_ID', ''))
+access_key_entry = tk.Entry(root, textvariable=access_key_var)
+
+secret_key_label = tk.Label(root, text='Secret Key')
+secret_key_var = tk.StringVar(value=os.environ.get('AWS_SECRET_ACCESS_KEY', ''))
+secret_key_entry = tk.Entry(root, textvariable=secret_key_var)
+
+marketplace_id_label = tk.Label(root, text='Marketplace ID')
+marketplace_id_var = tk.StringVar(value='ATVPDKIKX0DER')
+marketplace_id_entry = tk.Entry(root, textvariable=marketplace_id_var)
+
+asin_list_label = tk.Label(root, text='ASIN List (comma-separated)')
+asin_list_var = tk.StringVar(value='B07D956MNK,B07DPW123T')
+asin_list_entry = tk.Entry(root, textvariable=asin_list_var)
+
+min_price_label = tk.Label(root, text='Minimum Price (leave blank for no minimum)')
+min_price_var = tk.StringVar(value='')
+min_price_entry = tk.Entry(root, textvariable=min_price_var)
+
+max_price_label = tk.Label(root, text='Maximum Price (leave blank for no maximum)')
+max_price_var = tk.StringVar(value='')
+max_price_entry = tk.Entry(root, textvariable=max_price_var)
+
+repricing_frequency_label = tk.Label(root, text='Repricing Frequency in Seconds (comma-separated)')
+repricing_frequency_var = tk.StringVar(value='300,600')
+repricing_frequency_entry = tk.Entry(root, textvariable=repricing_frequency_var)
+
+submit_button = tk.Button(root, text='Start Repricing', command=submit_form)
+
+# Place form elements on grid
+region_label.grid(row=0, column=0, padx=5, pady=5, sticky='E')
+region_entry.grid(row=0, column=1, padx=5, pady=5, sticky='W')
+
+access_key_label.grid(row=1, column=0, padx=5, pady=5, sticky='E')
+access_key_entry.grid(row=1, column=1, padx=5, pady=5, sticky='W')
+
+secret_key_label.grid(row=2, column=0, padx=5, pady=5, sticky='E')
+secret_key_entry.grid(row=2, column=1, padx=5, pady=5, sticky='W')
+
+marketplace_id_label.grid(row=3, column=0, padx=5, pady=5, sticky='E')
+marketplace_id_entry.grid(row=3, column=1, padx=5, pady=5, sticky='W')
+
+min_price_label.grid(row=4, column=0, padx=5, pady=5, sticky='E')
+min_price_entry.grid(row=4, column=1, padx=5, pady=5, sticky='W')
+
+max_price_label.grid(row=5, column=0, padx=5, pady=5, sticky='E')
+max_price_entry.grid(row=5, column=1, padx=5, pady=5, sticky='W')
+
+desired_profit_label.grid(row=6, column=0, padx=5, pady=5, sticky='E')
+desired_profit_entry.grid(row=6, column=1, padx=5, pady=5, sticky='W')
+
+submit_button.grid(row=7, column=1, padx=5, pady=5, sticky='E')
+
+# part four
+# Add buttons to start and stop repricing
+start_button = tk.Button(root, text='Start Repricing', command=start_repricing)
+stop_button = tk.Button(root, text='Stop Repricing', command=stop_repricing, state='disabled')
+
+start_button.grid(row=5, column=0, padx=5, pady=5, sticky='E')
+stop_button.grid(row=5, column=1, padx=5, pady=5, sticky='W')
+
+# Add status label to grid
+status_label = tk.Label(root, text='Status: Not running')
+status_label.grid(row=6, column=0, columnspan=2, padx=5, pady=5)
+
+# Add log text box to grid
+log_label = tk.Label(root, text='Log:')
+log_label.grid(row=7, column=0, padx=5, pady=5, sticky='W')
+log_textbox = tk.Text(root, width=50, height=10, state='disabled')
+log_textbox.grid(row=8, column=0, columnspan=2, padx=5, pady=5)
+
+# part five
+
+# Add log text box to grid
+log_label = ttk.Label(mainframe, text='Log')
+log_label.grid(row=5, column=0, padx=5, pady=5, sticky='W')
+log_text = tk.Text(mainframe, state='disabled', width=50, height=10, wrap='word')
+log_text.grid(row=6, column=0, columnspan=2, padx=5, pady=5)
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S', stream=log_text)
+
+# Add buttons to grid
+start_button = ttk.Button(mainframe, text='Start', command=start_repricing)
+start_button.grid(row=7, column=0, padx=5, pady=5)
+stop_button = ttk.Button(mainframe, text='Stop', command=stop_repricing, state='disabled')
+stop_button.grid(row=7, column=1, padx=5, pady=5)
+
+# Start GUI
+root.mainloop()
